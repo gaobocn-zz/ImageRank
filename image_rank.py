@@ -5,10 +5,16 @@ import skimage.io as io
 import matplotlib.pyplot as plt
 import scipy.misc
 import pylab
+
 from sklearn.neighbors import KDTree
+from sklearn.feature_extraction.text import TfidfVectorizer
+
+import nltk
 from nltk.stem import WordNetLemmatizer
 from nltk.corpus import stopwords
+
 import time
+import string
 from collections import Counter
 import random
 
@@ -18,11 +24,48 @@ class ImageRank(object):
     def __init__(self, data_path='./tags_test/', start=0, end=2000, load_data=False):
         # initialize wordnet lemmatizer (need to download WordNet Corpus from NLTK)
         self.wordnet_lemmatizer = WordNetLemmatizer()
+        self.vectorizer = TfidfVectorizer(tokenizer=self.normalize, stop_words='english')
+        self.stemmer = nltk.stem.porter.PorterStemmer()
+        self.remove_punctuation_map = dict((ord(char), None) for char in string.punctuation)
         # English stop words list
         self.stop_words = set(stopwords.words('english'))
-        self.dictionary, self.index2words = self.build_dictionary(data_path, start, end)
+        # self.dictionary, self.index2words = self.build_dictionary(data_path, start, end)
         self.test_n = end - start
 
+
+    def _download_nltk(self):
+        """Call this the first time"""
+        nltk.download('punkt')
+        nltk.download('stopwords')
+        nltk.download('wordnet')
+        nltk.download('words')
+
+    def stem_tokens(self, tokens):
+        return [self.stemmer.stem(item) for item in tokens]
+
+    def normalize(self, text):
+        """Remove punctuation, lowercase, stem"""
+        return self.stem_tokens(nltk.word_tokenize(text.lower().translate(self.remove_punctuation_map)))
+
+    def cosine_sim(self, text1, text2):
+        """Compute cosine similarity"""
+        tfidf = self.vectorizer.fit_transform([text1, text2])
+        return ((tfidf * tfidf.T).A)[0,1]
+
+    def cos_distance_classifier(self, description_path, tag_path, d_start, d_end, t_start, t_end):
+        ind = []
+        tag_text = []
+        for i in range(t_start, t_end):
+            with open(tag_path + str(i) + '.txt', 'r') as t_file:
+                tag_text.append(t_file.read())
+        for i in range(d_start, d_end):
+            with open(description_path + str(i) + '.txt', 'r') as d_file:
+                d_text = d_file.read()
+                d_score = []
+                for j in range(len(tag_text)):
+                    d_score.append(self.cosine_sim(d_text, tag_text[j]))
+                ind.append(np.array(d_score).argsort()[-20:][::-1])
+        return ind
 
     # build dictionary based-on 2nd part of tags
     def build_dictionary(self, data_path='./tags_test/', start=0, end=2000):
@@ -42,15 +85,13 @@ class ImageRank(object):
                         word_i += 1
         return self.dictionary, self.index2words
 
-
-    def kNN_baseline(self, description_path='./descriptions_test/', start=0, end=2000):
+    def kNN_classifier(self, description_path='./descriptions_test/', start=0, end=2000):
         # binary BoW representation of test tags
         tag_bow = np.zeros((end - start, len(self.dictionary)), dtype=np.float32)
         for i in range(start, end):
             for word in self.index2words[i-start]:
                 if word in self.dictionary:
                     tag_bow[i-start][self.dictionary[word]] = 1.0
-
 
         # binary BoW representation of test descriptions
         description_bow = np.zeros((end - start, len(self.dictionary)), dtype=np.float32)
@@ -65,15 +106,12 @@ class ImageRank(object):
 
         # build KDTree for fast kNN
         kdt = KDTree(tag_bow)
-
         # kNN
         dist, ind = kdt.query(description_bow, k=20)
-
         return ind
 
-
-    def build_inverted_index(self, description_path='./descriptions_test/', start=0, end=2000):
-        # inverted_index { word : { description_index1 : count1, description_index2 : count2 } }
+    def word_freq_classifier(self, description_path='./descriptions_test/', start=0, end=2000):
+        # inverted_index {word: {description_index1: count1, description_index2: count2}}
         self.inverted_index = {}
         for word in self.dictionary:
             self.inverted_index[word] = {}
@@ -98,11 +136,13 @@ class ImageRank(object):
                             for j in self.inverted_index[w]:
                                 if j in tdict:
                                     tdict[j] += 1
+                                    # tdict[j] += 1 / len(self.inverted_index[w])
                                 else:
                                     tdict[j] = 1
+                                    # tdict[j] = 1 / len(self.inverted_index[w])
             tcounter = Counter(tdict).most_common(20)
-            if i == 0:
-                print(tcounter)
+            # if i == 0:
+            #     print(tcounter)
             ind.append([])
             for key, val in tcounter:
                 ind[-1].append(key)
@@ -128,10 +168,12 @@ def write_submission(ind):
     f.close()
 
 def validation():
-    data_len = 5000
+    data_len = 1000
     image_rank = ImageRank('./tags_train/', 0, data_len)
-    # ind = image_rank.kNN_baseline('./descriptions_train/', 0, data_len)
-    ind = image_rank.build_inverted_index('./descriptions_train/', 0, data_len)
+    # image_rank.build_dictionary('./tags_train/', 0, data_len)
+    # ind = image_rank.kNN_classifier('./descriptions_train/', 0, data_len)
+    # ind = image_rank.word_freq_classifier('./descriptions_train/', 0, data_len)
+    ind = image_rank.cos_distance_classifier('./descriptions_train/', './tags_train/', 0, data_len, 0, data_len)
     score = 0
     for i in range(data_len):
         for j in range(20):
@@ -143,17 +185,16 @@ def validation():
 
 
 if __name__ == '__main__':
-    run_test = True
+    run_validation = True
     start = time.time()
 
-    if run_test:
+    if run_validation:
         validation()
     else:
         image_rank = ImageRank()
-        # ind = image_rank.kNN_baseline()
-        ind = image_rank.build_inverted_index()
+        # ind = image_rank.kNN_classifier()
+        ind = image_rank.word_freq_classifier()
         write_submission(ind)
-
 
     end = time.time()
     print('Total time elapsed: ' + str(end - start))
