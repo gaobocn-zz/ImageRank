@@ -1,3 +1,10 @@
+# @Author: Gao Bo
+# @Date:   2016-12-01T08:01:43-05:00
+# @Last modified by:   Gao Bo
+# @Last modified time: 2016-12-04T02:04:52-05:00
+
+
+
 # load libraries
 # %matplotlib inline
 import numpy as np
@@ -24,17 +31,11 @@ import random
 
 class ImageRank(object):
     """docstring for image_rank."""
-    def __init__(self, data_path='./tags_test/', start=0, end=2000, load_data=False):
-        # initialize wordnet lemmatizer (need to download WordNet Corpus from NLTK)
+    def __init__(self):
         self.wordnet_lemmatizer = WordNetLemmatizer()
-        self.vectorizer = TfidfVectorizer(tokenizer=self.normalize, stop_words='english')
-        self.stemmer = nltk.stem.porter.PorterStemmer()
-        self.remove_punctuation_map = dict((ord(char), None) for char in string.punctuation)
-        # English stop words list
-        self.stop_words = set(stopwords.words('english'))
-        # self.build_dictionary(data_path, start, end)
-        self.test_n = end - start
-
+        # stop_words doesn't matter because tags don't include stop words
+        # self.stop_words = set(stopwords.words('english'))
+        # self.stemmer = nltk.stem.porter.PorterStemmer()
 
     def _download_nltk(self):
         """Call this the first time"""
@@ -42,18 +43,6 @@ class ImageRank(object):
         nltk.download('stopwords')
         nltk.download('wordnet')
         nltk.download('words')
-
-    def stem_tokens(self, tokens):
-        return [self.stemmer.stem(item) for item in tokens]
-
-    def normalize(self, text):
-        """Remove punctuation, lowercase, stem"""
-        return nltk.word_tokenize(text.lower().translate(self.remove_punctuation_map))
-
-    def cosine_sim(self, text1, text2):
-        """Compute cosine similarity"""
-        tfidf = self.vectorizer.fit_transform([text1, text2])
-        return ((tfidf * tfidf.T).A)[0,1]
 
     # build dictionary based-on 2nd part of tags
     def build_dictionary(self, data_path='./tags_test/', start=0, end=2000):
@@ -65,17 +54,31 @@ class ImageRank(object):
         for i in range(start, end):
             self.index2words.append([])
             for line in open(data_path + str(i) + '.txt'):
-                w = line.strip().split(':')[1]
-                w = w.split()
-                for word in w:
+                tword = line.strip().split(':')[1]
+                w_list = tword.split()
+                # if len(w_list) > 1:
+                    # w_list.append(''.join(w_list))
+                for word in w_list:
                     word = self.wordnet_lemmatizer.lemmatize(word)
                     self.index2words[-1].append(word)
                     if word not in self.dictionary:
                         self.dictionary[word] = word_i
                         word_i += 1
 
-    def get_cos_sim(self, vec1, vec2):
-        return np.dot(vec1, vec2) / (norm(vec1) * norm(vec2) + 1e-10)
+    def get_cos_sim(self, vec1, vec2, delta=1):
+        return np.dot(vec1, vec2) / (norm(vec1) * norm(vec2) + delta)
+
+    def ensemble_cos_kNN(self, description_path='./descriptions_test/', start=0, end=2000):
+        print('ensemble_cos_kNN...')
+        cos_dist, cos_ind = self.cos_distance_classifier(description_path, start, end)
+        # cos_dist, cos_ind = self.kNN_classifier(description_path, start, end)
+        kNN_dist, kNN_ind = self.kNN_classifier(description_path, start, end)
+        ind = []
+        for i in range(start, end):
+            tdist = kNN_dist[i]
+            tdist = (tdist-min(tdist))/(max(tdist)-min(tdist))/4 - cos_dist[i]
+            ind.append(tdist.argsort()[:20])
+        return ind
 
     def cos_distance_classifier(self, description_path='./descriptions_test/', start=0, end=2000):
         print('cos_distance_classifier...')
@@ -90,21 +93,21 @@ class ImageRank(object):
         description_bow = np.zeros((end - start, len(self.dictionary)), dtype=np.float32)
         for i in range(start, end):
             for line in open(description_path + str(i) + '.txt'):
-                for w in line.strip().split('.')[0].split():
-                    w = w.lower()
-                    if w not in self.stop_words:
-                        w = self.wordnet_lemmatizer.lemmatize(w)
-                        if w in self.dictionary:
-                            description_bow[i-start][self.dictionary[w]] = 1.0
+                for word in line.strip().split('.')[0].split():
+                    word = word.lower()
+                    word = self.wordnet_lemmatizer.lemmatize(word)
+                    if word in self.dictionary:
+                        description_bow[i-start][self.dictionary[word]] = 1.0
 
         ind = []
+        t_score = []
         for i in range(start, end):
-            t_score = []
+            t_score.append([])
             for j in range(start, end):
-                t_score.append(self.get_cos_sim(description_bow[i-start], tag_bow[j]))
-            ind.append(np.array(t_score).argsort()[-20:][::-1])
+                t_score[-1].append(self.get_cos_sim(description_bow[i-start], tag_bow[j-start]))
+            ind.append(np.array(t_score[-1]).argsort()[-20:][::-1])
 
-        return ind
+        return np.array(t_score), ind
 
     def kNN_classifier(self, description_path='./descriptions_test/', start=0, end=2000):
         print('kNN_classifier...')
@@ -121,16 +124,17 @@ class ImageRank(object):
             for line in open(description_path + str(i) + '.txt'):
                 for w in line.strip().split('.')[0].split():
                     w = w.lower()
-                    if w not in self.stop_words:
-                        w = self.wordnet_lemmatizer.lemmatize(w)
-                        if w in self.dictionary:
-                            description_bow[i-start][self.dictionary[w]] = 1.0
+                    w = self.wordnet_lemmatizer.lemmatize(w)
+                    if w in self.dictionary:
+                        description_bow[i-start][self.dictionary[w]] += 1.0
 
         # build KDTree for fast kNN
         kdt = KDTree(tag_bow)
         # kNN
-        dist, ind = kdt.query(description_bow, k=20)
-        return ind
+        dist, ind = kdt.query(description_bow, k=end-start)
+        for i in range(start, end):
+            dist[i][ind[i]] = dist[i]
+        return np.array(dist), ind[:,:20]
 
     def word_freq_classifier(self, description_path='./descriptions_test/', start=0, end=2000):
         print('word_freq_classifier...')
@@ -153,19 +157,14 @@ class ImageRank(object):
             for line in open(description_path + str(i) + '.txt'):
                 for w in line.strip().split('.')[0].split():
                     w = w.lower()
-                    if w not in self.stop_words:
-                        w = self.wordnet_lemmatizer.lemmatize(w)
-                        if w in self.inverted_index:
-                            for j in self.inverted_index[w]:
-                                if j in tdict:
-                                    tdict[j] += 1
-                                    # tdict[j] += 1 / len(self.inverted_index[w])
-                                else:
-                                    tdict[j] = 1
-                                    # tdict[j] = 1 / len(self.inverted_index[w])
+                    w = self.wordnet_lemmatizer.lemmatize(w)
+                    if w in self.inverted_index:
+                        for j in self.inverted_index[w]:
+                            if j in tdict:
+                                tdict[j] += 1
+                            else:
+                                tdict[j] = 1
             tcounter = Counter(tdict).most_common(20)
-            # if i == 0:
-            #     print(tcounter)
             ind.append([])
             for key, val in tcounter:
                 ind[-1].append(key)
@@ -191,24 +190,26 @@ def write_submission(ind):
     f.close()
 
 def validation():
-    data_len = 1000
-    image_rank = ImageRank('./tags_train/', 0, data_len)
+    data_len = 2000
+    start = 0
+    image_rank = ImageRank()
     image_rank.build_dictionary('./tags_train/', 0, data_len)
-    # ind = image_rank.kNN_classifier('./descriptions_train/', 0, data_len)
-    # ind = image_rank.word_freq_classifier('./descriptions_train/', 0, data_len)
-    ind = image_rank.cos_distance_classifier('./descriptions_train/', 0, data_len)
+    # dist, ind = image_rank.kNN_classifier('./descriptions_train/', 0, data_len)
+    # dist, ind = image_rank.cos_distance_classifier('./descriptions_train/', 0, data_len)
+    ind = image_rank.ensemble_cos_kNN('./descriptions_train/', 0, data_len)
+    # print(dist[:10][:10])
     score = 0
     for i in range(data_len):
         for j in range(20):
-            if ind[i][j] == i:
+            if ind[i][j] == start + i:
                 score += 20 - j
-    score = (score / 20) / data_len
+    score = (score / 20.0) / data_len
     print('Score is: ' + str(score))
     # write_submission(ind)
 
 
 if __name__ == '__main__':
-    run_validation = True
+    run_validation = False
     start = time.time()
 
     if run_validation:
@@ -216,9 +217,7 @@ if __name__ == '__main__':
     else:
         image_rank = ImageRank()
         image_rank.build_dictionary()
-        # ind = image_rank.kNN_classifier()
-        # ind = image_rank.word_freq_classifier()
-        ind = image_rank.cos_distance_classifier()
+        ind = image_rank.ensemble_cos_kNN()
         write_submission(ind)
 
     end = time.time()
